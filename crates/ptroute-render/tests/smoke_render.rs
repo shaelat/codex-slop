@@ -20,8 +20,11 @@ fn render_scene_outputs_image() {
     };
 
     let settings = RenderSettings {
-        width: 64,
-        height: 48,
+        width: 32,
+        height: 24,
+        spp: 2,
+        bounces: 2,
+        seed: 1,
     };
 
     let image = render_scene(&scene, &settings);
