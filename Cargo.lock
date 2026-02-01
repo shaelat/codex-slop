@@ -271,14 +271,19 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "ptroute-graph",
  "ptroute-model",
  "ptroute-trace",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "ptroute-graph"
 version = "0.1.0"
+dependencies = [
+ "ptroute-model",
+]
 
 [[package]]
 name = "ptroute-model"

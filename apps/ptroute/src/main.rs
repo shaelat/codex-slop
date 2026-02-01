@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand};
+use ptroute_graph::build_graph;
 use ptroute_model::{TraceFile, TraceRun};
 use ptroute_trace::{parse_traceroute_n_with_target, run_traceroute, TraceSettings};
 use std::fs;
@@ -56,7 +57,13 @@ struct TraceArgs {
 }
 
 #[derive(Args)]
-struct BuildArgs {}
+struct BuildArgs {
+    #[arg(long = "in")]
+    in_path: PathBuf,
+
+    #[arg(long)]
+    out: PathBuf,
+}
 
 #[derive(Args)]
 struct RenderArgs {}
@@ -73,10 +80,7 @@ fn run() -> Result<()> {
 
     match cli.command {
         Commands::Trace(args) => run_trace(args),
-        Commands::Build(_) => {
-            println!("not implemented");
-            Ok(())
-        }
+        Commands::Build(args) => run_build(args),
         Commands::Render(_) => {
             println!("not implemented");
             Ok(())
@@ -147,18 +151,27 @@ fn run_trace(args: TraceArgs) -> Result<()> {
         }
     }
 
-    if let Some(parent) = args.out.parent() {
+    write_json(&args.out, &TraceFile { version: 1, runs })
+}
+
+fn run_build(args: BuildArgs) -> Result<()> {
+    let contents = fs::read_to_string(&args.in_path)
+        .map_err(|err| anyhow!("failed to read input {:?}: {}", args.in_path, err))?;
+    let trace_file: TraceFile = serde_json::from_str(&contents)
+        .map_err(|err| anyhow!("failed to parse traces {:?}: {}", args.in_path, err))?;
+    let graph = build_graph(&trace_file);
+    write_json(&args.out, &graph)
+}
+
+fn write_json<T: serde::Serialize>(path: &PathBuf, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|err| {
-                anyhow!("failed to create output directory {:?}: {}", parent, err)
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|err| anyhow!("failed to create output directory {:?}: {}", parent, err))?;
         }
     }
 
-    let trace_file = TraceFile { version: 1, runs };
-    let json = serde_json::to_string_pretty(&trace_file)?;
-    fs::write(&args.out, json)
-        .map_err(|err| anyhow!("failed to write output {:?}: {}", args.out, err))?;
-
+    let json = serde_json::to_string_pretty(value)?;
+    fs::write(path, json).map_err(|err| anyhow!("failed to write output {:?}: {}", path, err))?;
     Ok(())
 }
