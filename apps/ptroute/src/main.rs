@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand};
-use ptroute_graph::build_graph;
-use ptroute_model::{TraceFile, TraceRun};
+use ptroute_graph::{build_graph, layout_graph};
+use ptroute_model::{SceneFile, TraceFile, TraceRun};
 use ptroute_trace::{parse_traceroute_n_with_target, run_traceroute, TraceSettings};
 use std::fs;
 use std::path::PathBuf;
@@ -20,6 +20,7 @@ struct Cli {
 enum Commands {
     Trace(TraceArgs),
     Build(BuildArgs),
+    Layout(LayoutArgs),
     Render(RenderArgs),
 }
 
@@ -66,7 +67,25 @@ struct BuildArgs {
 }
 
 #[derive(Args)]
-struct RenderArgs {}
+struct LayoutArgs {
+    #[arg(long = "in")]
+    in_path: PathBuf,
+
+    #[arg(long)]
+    out: PathBuf,
+
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+}
+
+#[derive(Args)]
+struct RenderArgs {
+    #[arg(long = "in")]
+    in_path: PathBuf,
+
+    #[arg(long)]
+    out: PathBuf,
+}
 
 fn main() {
     if let Err(err) = run() {
@@ -81,6 +100,7 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::Trace(args) => run_trace(args),
         Commands::Build(args) => run_build(args),
+        Commands::Layout(args) => run_layout(args),
         Commands::Render(_) => {
             println!("not implemented");
             Ok(())
@@ -161,6 +181,15 @@ fn run_build(args: BuildArgs) -> Result<()> {
         .map_err(|err| anyhow!("failed to parse traces {:?}: {}", args.in_path, err))?;
     let graph = build_graph(&trace_file);
     write_json(&args.out, &graph)
+}
+
+fn run_layout(args: LayoutArgs) -> Result<()> {
+    let contents = fs::read_to_string(&args.in_path)
+        .map_err(|err| anyhow!("failed to read input {:?}: {}", args.in_path, err))?;
+    let graph: ptroute_model::GraphFile = serde_json::from_str(&contents)
+        .map_err(|err| anyhow!("failed to parse graph {:?}: {}", args.in_path, err))?;
+    let scene: SceneFile = layout_graph(&graph, args.seed);
+    write_json(&args.out, &scene)
 }
 
 fn write_json<T: serde::Serialize>(path: &PathBuf, value: &T) -> Result<()> {

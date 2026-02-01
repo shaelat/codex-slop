@@ -44,6 +44,29 @@ pub struct Edge {
     pub rtt_delta_ms_avg: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SceneFile {
+    pub version: u32,
+    pub nodes: Vec<SceneNode>,
+    pub edges: Vec<SceneEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SceneNode {
+    pub id: String,
+    pub position: [f32; 3],
+    pub seen: u32,
+    pub loss_probes: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SceneEdge {
+    pub from: String,
+    pub to: String,
+    pub seen: u32,
+    pub rtt_delta_ms_avg: f64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +135,32 @@ mod tests {
         let json2 = serde_json::to_string_pretty(&decoded).unwrap();
 
         assert_eq!(graph, decoded);
+        assert_eq!(json, json2);
+    }
+
+    #[test]
+    fn scene_file_round_trip_is_stable() {
+        let scene = SceneFile {
+            version: 1,
+            nodes: vec![SceneNode {
+                id: "192.168.1.1".to_string(),
+                position: [0.0, 0.5, -0.25],
+                seen: 10,
+                loss_probes: 0,
+            }],
+            edges: vec![SceneEdge {
+                from: "192.168.1.1".to_string(),
+                to: "10.0.0.1".to_string(),
+                seen: 10,
+                rtt_delta_ms_avg: 4.0,
+            }],
+        };
+
+        let json = serde_json::to_string_pretty(&scene).unwrap();
+        let decoded: SceneFile = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string_pretty(&decoded).unwrap();
+
+        assert_eq!(scene, decoded);
         assert_eq!(json, json2);
     }
 }

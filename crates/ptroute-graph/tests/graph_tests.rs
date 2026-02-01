@@ -1,5 +1,5 @@
-use ptroute_graph::build_graph;
-use ptroute_model::{Hop, TraceFile, TraceRun};
+use ptroute_graph::{build_graph, layout_graph};
+use ptroute_model::{Edge, GraphFile, Hop, Node, TraceFile, TraceRun};
 
 fn hop(ttl: u32, ip: Option<&str>, rtt: &[Option<f64>]) -> Hop {
     Hop {
@@ -64,4 +64,79 @@ fn build_graph_counts_nodes_edges() {
     let edge_c = edge("10.0.0.1", "10.0.0.3");
     assert_eq!(edge_c.seen, 1);
     assert!((edge_c.rtt_delta_ms_avg - 3.0).abs() < 1e-6);
+}
+
+#[test]
+fn layout_is_deterministic_for_seed() {
+    let graph = GraphFile {
+        version: 1,
+        nodes: vec![
+            Node {
+                id: "a".to_string(),
+                seen: 1,
+                loss_probes: 0,
+            },
+            Node {
+                id: "b".to_string(),
+                seen: 1,
+                loss_probes: 0,
+            },
+            Node {
+                id: "c".to_string(),
+                seen: 1,
+                loss_probes: 0,
+            },
+        ],
+        edges: vec![
+            Edge {
+                from: "a".to_string(),
+                to: "b".to_string(),
+                seen: 1,
+                rtt_delta_ms_avg: 1.0,
+            },
+            Edge {
+                from: "b".to_string(),
+                to: "c".to_string(),
+                seen: 1,
+                rtt_delta_ms_avg: 1.0,
+            },
+        ],
+    };
+
+    let scene_a = layout_graph(&graph, 42);
+    let scene_b = layout_graph(&graph, 42);
+
+    assert_eq!(scene_a, scene_b);
+}
+
+#[test]
+fn layout_changes_with_seed() {
+    let graph = GraphFile {
+        version: 1,
+        nodes: vec![
+            Node {
+                id: "a".to_string(),
+                seen: 1,
+                loss_probes: 0,
+            },
+            Node {
+                id: "b".to_string(),
+                seen: 1,
+                loss_probes: 0,
+            },
+        ],
+        edges: vec![Edge {
+            from: "a".to_string(),
+            to: "b".to_string(),
+            seen: 1,
+            rtt_delta_ms_avg: 1.0,
+        }],
+    };
+
+    let scene_a = layout_graph(&graph, 1);
+    let scene_b = layout_graph(&graph, 2);
+
+    let z_a = scene_a.nodes[0].position[2];
+    let z_b = scene_b.nodes[0].position[2];
+    assert_ne!(z_a, z_b);
 }
