@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 image = "0.25.5"
 ptroute-model = { path = "../ptroute-model" }
+rayon = "1.11.0"
