@@ -3,6 +3,7 @@ use crate::geometry::{Hit, Sphere};
 use crate::math::{Ray, Vec3};
 use image::{Rgb, RgbImage};
 use ptroute_model::SceneFile;
+use std::collections::HashMap;
 
 pub struct RenderSettings {
     pub width: u32,
@@ -45,6 +46,7 @@ fn trace(ray: &Ray, spheres: &[Sphere], bounces: u32, rng: &mut Rng) -> Vec3 {
 
     for _ in 0..bounces {
         if let Some(hit) = closest_hit(&current_ray, spheres) {
+            color = color + throughput.mul_elem(hit.emission);
             let direction = random_in_hemisphere(hit.normal, rng);
             current_ray = Ray {
                 origin: hit.point + hit.normal * 0.001,
@@ -101,19 +103,52 @@ fn background(ray: &Ray) -> Vec3 {
 }
 
 fn build_spheres(scene: &SceneFile) -> Vec<Sphere> {
-    scene
-        .nodes
-        .iter()
-        .map(|node| {
-            let position = Vec3::new(node.position[0], node.position[1], node.position[2]);
-            let radius = node_radius(node.seen);
-            Sphere {
-                center: position,
+    let mut spheres = Vec::new();
+    let mut positions: HashMap<String, Vec3> = HashMap::new();
+
+    for node in &scene.nodes {
+        let position = Vec3::new(node.position[0], node.position[1], node.position[2]);
+        positions.insert(node.id.clone(), position);
+        spheres.push(Sphere {
+            center: position,
+            radius: node_radius(node.seen),
+            albedo: color_from_id(&node.id),
+            emission: Vec3::zero(),
+        });
+    }
+
+    for edge in &scene.edges {
+        let Some(from) = positions.get(&edge.from) else { continue };
+        let Some(to) = positions.get(&edge.to) else { continue };
+
+        let delta = *to - *from;
+        let distance = delta.length();
+        if distance <= 0.0001 {
+            continue;
+        }
+
+        let radius = link_radius(edge.seen);
+        let spacing = (radius * 3.0).max(0.05);
+        let steps = ((distance / spacing).ceil() as u32).max(2);
+
+        let base_color = color_from_id(&format!("{}->{}", edge.from, edge.to));
+        let intensity = link_intensity(edge.seen, edge.rtt_delta_ms_avg);
+        let emission = base_color * intensity;
+        let albedo = Vec3::new(0.08, 0.08, 0.08);
+
+        for i in 1..steps {
+            let t = i as f32 / steps as f32;
+            let center = *from + delta * t;
+            spheres.push(Sphere {
+                center,
                 radius,
-                albedo: color_from_id(&node.id),
-            }
-        })
-        .collect()
+                albedo,
+                emission,
+            });
+        }
+    }
+
+    spheres
 }
 
 fn build_camera(scene: &SceneFile, settings: &RenderSettings) -> Camera {
@@ -142,6 +177,18 @@ fn node_radius(seen: u32) -> f32 {
     let base = 0.15;
     let scale = (seen.max(1) as f32).ln() * 0.05;
     base + scale
+}
+
+fn link_radius(seen: u32) -> f32 {
+    let base = 0.04;
+    let scale = (seen.max(1) as f32).ln() * 0.01;
+    base + scale
+}
+
+fn link_intensity(seen: u32, rtt_delta: f64) -> f32 {
+    let freq = (seen.max(1) as f32).ln() + 1.0;
+    let rtt = 1.0 / (1.0 + (rtt_delta.abs() as f32 / 50.0));
+    3.0 * freq * rtt
 }
 
 fn color_from_id(id: &str) -> Vec3 {
