@@ -6,6 +6,7 @@ pub struct Hit {
     pub point: Vec3,
     pub normal: Vec3,
     pub albedo: Vec3,
+    pub emission: Vec3,
 }
 
 #[derive(Debug, Clone)]
@@ -13,6 +14,7 @@ pub struct Sphere {
     pub center: Vec3,
     pub radius: f32,
     pub albedo: Vec3,
+    pub emission: Vec3,
 }
 
 impl Sphere {
@@ -42,6 +44,7 @@ impl Sphere {
             point,
             normal,
             albedo: self.albedo,
+            emission: self.emission,
         })
     }
 }
