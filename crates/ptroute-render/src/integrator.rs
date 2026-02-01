@@ -4,6 +4,7 @@ use crate::math::{Ray, Vec3};
 use image::{Rgb, RgbImage};
 use ptroute_model::SceneFile;
 use std::collections::HashMap;
+use std::time::Instant;
 
 pub struct RenderSettings {
     pub width: u32,
@@ -11,6 +12,7 @@ pub struct RenderSettings {
     pub spp: u32,
     pub bounces: u32,
     pub seed: u64,
+    pub progress_every: u32,
 }
 
 pub fn render_scene(scene: &SceneFile, settings: &RenderSettings) -> RgbImage {
@@ -20,6 +22,8 @@ pub fn render_scene(scene: &SceneFile, settings: &RenderSettings) -> RgbImage {
 
     let spp = settings.spp.max(1);
     let bounces = settings.bounces.max(1);
+    let progress_every = settings.progress_every;
+    let start = Instant::now();
 
     for y in 0..settings.height {
         for x in 0..settings.width {
@@ -33,6 +37,24 @@ pub fn render_scene(scene: &SceneFile, settings: &RenderSettings) -> RgbImage {
             }
             let color = color / spp as f32;
             image.put_pixel(x, y, to_rgb(color));
+        }
+
+        if progress_every > 0 {
+            let done = y + 1;
+            if done == settings.height || done % progress_every == 0 {
+                let elapsed = start.elapsed().as_secs_f64();
+                let percent = (done as f64 / settings.height as f64) * 100.0;
+                let total = if done > 0 {
+                    elapsed * settings.height as f64 / done as f64
+                } else {
+                    0.0
+                };
+                let remaining = (total - elapsed).max(0.0);
+                eprintln!(
+                    "render: {}/{} ({:.1}%) elapsed {:.1}s eta {:.1}s",
+                    done, settings.height, percent, elapsed, remaining
+                );
+            }
         }
     }
 

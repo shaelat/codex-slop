@@ -25,6 +25,7 @@ fn render_scene_outputs_image() {
         spp: 2,
         bounces: 2,
         seed: 1,
+        progress_every: 0,
     };
 
     let image = render_scene(&scene, &settings);
