@@ -77,6 +77,9 @@ struct LayoutArgs {
 
     #[arg(long, default_value_t = 1)]
     seed: u64,
+
+    #[arg(long, default_value_t = 32)]
+    progress_every: u32,
 }
 
 #[derive(Args)]
@@ -101,6 +104,9 @@ struct RenderArgs {
 
     #[arg(long, default_value_t = 1)]
     seed: u64,
+
+    #[arg(long, default_value_t = 32)]
+    progress_every: u32,
 }
 
 fn main() {
@@ -217,6 +223,7 @@ fn run_render(args: RenderArgs) -> Result<()> {
         spp: args.spp,
         bounces: args.bounces,
         seed: args.seed,
+        progress_every: args.progress_every,
     };
 
     let image = render_scene(&scene, &settings);
