@@ -1,9 +1,12 @@
+use crate::bvh::Bvh;
 use crate::camera::Camera;
-use crate::geometry::{Hit, Sphere};
+use crate::geometry::Sphere;
 use crate::math::{Ray, Vec3};
 use image::{Rgb, RgbImage};
 use ptroute_model::SceneFile;
+use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 pub struct RenderSettings {
@@ -13,61 +16,116 @@ pub struct RenderSettings {
     pub bounces: u32,
     pub seed: u64,
     pub progress_every: u32,
+    pub threads: usize,
 }
 
 pub fn render_scene(scene: &SceneFile, settings: &RenderSettings) -> RgbImage {
-    let spheres = build_spheres(scene);
-    let camera = build_camera(scene, settings);
-    let mut image = RgbImage::new(settings.width, settings.height);
+    let context = RenderContext::new(scene, settings);
+    let mut accum = vec![Vec3::zero(); (settings.width * settings.height) as usize];
+    render_scene_accum(&context, settings, &mut accum, 0, settings.spp);
+    image_from_accum(&accum, settings.width, settings.height, settings.spp)
+}
 
-    let spp = settings.spp.max(1);
+pub fn render_scene_progressive<F>(
+    scene: &SceneFile,
+    settings: &RenderSettings,
+    progressive_every: u32,
+    mut on_pass: F,
+) where
+    F: FnMut(&RgbImage, u32),
+{
+    let context = RenderContext::new(scene, settings);
+    let mut accum = vec![Vec3::zero(); (settings.width * settings.height) as usize];
+
+    let mut done = 0;
+    let target = settings.spp.max(1);
+    let step = progressive_every.max(1);
+
+    while done < target {
+        let pass = (target - done).min(step);
+        render_scene_accum(&context, settings, &mut accum, done, pass);
+        done += pass;
+        let image = image_from_accum(&accum, settings.width, settings.height, done);
+        on_pass(&image, done);
+    }
+}
+
+fn render_scene_accum(
+    context: &RenderContext,
+    settings: &RenderSettings,
+    accum: &mut [Vec3],
+    sample_offset: u32,
+    samples: u32,
+) {
+    let width = settings.width as usize;
+    let height = settings.height;
+    let spp = samples.max(1);
     let bounces = settings.bounces.max(1);
     let progress_every = settings.progress_every;
     let start = Instant::now();
+    let counter = AtomicU32::new(0);
 
-    for y in 0..settings.height {
-        for x in 0..settings.width {
-            let mut color = Vec3::zero();
-            for sample in 0..spp {
-                let mut rng = Rng::new(hash_seed(settings.seed, x, y, sample));
-                let u = (x as f32 + rng.next_f32()) / settings.width as f32;
-                let v = (y as f32 + rng.next_f32()) / settings.height as f32;
-                let ray = camera.ray(u, 1.0 - v);
-                color = color + trace(&ray, &spheres, bounces, &mut rng);
-            }
-            let color = color / spp as f32;
+    with_thread_pool(settings.threads, || {
+        accum
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for x in 0..width {
+                    let mut color = Vec3::zero();
+                    for sample in 0..spp {
+                        let sample_index = sample_offset + sample;
+                        let mut rng = Rng::new(hash_seed(settings.seed, x as u32, y as u32, sample_index));
+                        let u = (x as f32 + rng.next_f32()) / settings.width as f32;
+                        let v = (y as f32 + rng.next_f32()) / settings.height as f32;
+                        let ray = context.camera.ray(u, 1.0 - v);
+                        color = color + trace(&ray, &context.bvh, bounces, &mut rng);
+                    }
+                    row[x] = row[x] + color;
+                }
+
+                if progress_every > 0 {
+                    let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if done == height || done % progress_every == 0 {
+                        let elapsed = start.elapsed().as_secs_f64();
+                        let percent = (done as f64 / height as f64) * 100.0;
+                        let total = if done > 0 {
+                            elapsed * height as f64 / done as f64
+                        } else {
+                            0.0
+                        };
+                        let remaining = (total - elapsed).max(0.0);
+                        eprintln!(
+                            "render: {}/{} ({:.1}%) elapsed {:.1}s eta {:.1}s",
+                            done, height, percent, elapsed, remaining
+                        );
+                    }
+                }
+            });
+    });
+}
+
+fn image_from_accum(accum: &[Vec3], width: u32, height: u32, samples: u32) -> RgbImage {
+    let mut image = RgbImage::new(width, height);
+    let scale = 1.0 / samples.max(1) as f32;
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) as usize;
+            let color = accum[idx] * scale;
             image.put_pixel(x, y, to_rgb(color));
-        }
-
-        if progress_every > 0 {
-            let done = y + 1;
-            if done == settings.height || done % progress_every == 0 {
-                let elapsed = start.elapsed().as_secs_f64();
-                let percent = (done as f64 / settings.height as f64) * 100.0;
-                let total = if done > 0 {
-                    elapsed * settings.height as f64 / done as f64
-                } else {
-                    0.0
-                };
-                let remaining = (total - elapsed).max(0.0);
-                eprintln!(
-                    "render: {}/{} ({:.1}%) elapsed {:.1}s eta {:.1}s",
-                    done, settings.height, percent, elapsed, remaining
-                );
-            }
         }
     }
 
     image
 }
 
-fn trace(ray: &Ray, spheres: &[Sphere], bounces: u32, rng: &mut Rng) -> Vec3 {
+fn trace(ray: &Ray, bvh: &Bvh, bounces: u32, rng: &mut Rng) -> Vec3 {
     let mut current_ray = *ray;
     let mut throughput = Vec3::new(1.0, 1.0, 1.0);
     let mut color = Vec3::zero();
 
     for _ in 0..bounces {
-        if let Some(hit) = closest_hit(&current_ray, spheres) {
+        if let Some(hit) = bvh.hit(&current_ray, 0.001, f32::INFINITY) {
             color = color + throughput.mul_elem(hit.emission);
             let direction = random_in_hemisphere(hit.normal, rng);
             current_ray = Ray {
@@ -105,23 +163,25 @@ fn random_unit_vector(rng: &mut Rng) -> Vec3 {
     }
 }
 
-fn closest_hit(ray: &Ray, spheres: &[Sphere]) -> Option<Hit> {
-    let mut closest = None;
-    let mut closest_t = f32::INFINITY;
-    for sphere in spheres {
-        if let Some(hit) = sphere.hit(ray, 0.001, closest_t) {
-            closest_t = hit.t;
-            closest = Some(hit);
-        }
-    }
-    closest
-}
-
 fn background(ray: &Ray) -> Vec3 {
     let t = 0.5 * (ray.direction.y + 1.0);
     let sky = Vec3::new(0.6, 0.8, 1.0);
     let ground = Vec3::new(0.05, 0.05, 0.07);
     ground * (1.0 - t) + sky * t
+}
+
+struct RenderContext {
+    bvh: Bvh,
+    camera: Camera,
+}
+
+impl RenderContext {
+    fn new(scene: &SceneFile, settings: &RenderSettings) -> Self {
+        let spheres = build_spheres(scene);
+        let bvh = Bvh::new(spheres);
+        let camera = build_camera(scene, settings);
+        Self { bvh, camera }
+    }
 }
 
 fn build_spheres(scene: &SceneFile) -> Vec<Sphere> {
@@ -264,5 +324,17 @@ impl Rng {
     fn next_f32(&mut self) -> f32 {
         let value = self.next_u32();
         value as f32 / u32::MAX as f32
+    }
+}
+
+fn with_thread_pool<T: Send>(threads: usize, f: impl FnOnce() -> T + Send) -> T {
+    if threads == 0 {
+        f()
+    } else {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("failed to build rayon pool")
+            .install(f)
     }
 }

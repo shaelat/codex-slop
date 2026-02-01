@@ -26,6 +26,7 @@ fn render_scene_outputs_image() {
         bounces: 2,
         seed: 1,
         progress_every: 0,
+        threads: 0,
     };
 
     let image = render_scene(&scene, &settings);

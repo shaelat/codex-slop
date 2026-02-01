@@ -3,7 +3,7 @@ use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand};
 use ptroute_graph::{build_graph, layout_graph};
 use ptroute_model::{SceneFile, TraceFile, TraceRun};
-use ptroute_render::{render_scene, write_png, RenderSettings};
+use ptroute_render::{render_scene, render_scene_progressive, write_png, RenderSettings};
 use ptroute_trace::{parse_traceroute_n_with_target, run_traceroute, TraceSettings};
 use std::fs;
 use std::path::PathBuf;
@@ -80,6 +80,12 @@ struct LayoutArgs {
 
     #[arg(long, default_value_t = 32)]
     progress_every: u32,
+
+    #[arg(long, default_value_t = 0)]
+    threads: usize,
+
+    #[arg(long, default_value_t = 0)]
+    progressive_every: u32,
 }
 
 #[derive(Args)]
@@ -107,6 +113,12 @@ struct RenderArgs {
 
     #[arg(long, default_value_t = 32)]
     progress_every: u32,
+
+    #[arg(long, default_value_t = 0)]
+    threads: usize,
+
+    #[arg(long, default_value_t = 0)]
+    progressive_every: u32,
 }
 
 fn main() {
@@ -224,17 +236,30 @@ fn run_render(args: RenderArgs) -> Result<()> {
         bounces: args.bounces,
         seed: args.seed,
         progress_every: args.progress_every,
+        threads: args.threads,
     };
 
-    let image = render_scene(&scene, &settings);
     if let Some(parent) = args.out.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)
                 .map_err(|err| anyhow!("failed to create output directory {:?}: {}", parent, err))?;
         }
     }
-    write_png(&args.out, &image).map_err(|err| anyhow!("failed to write png: {err}"))?;
-    Ok(())
+
+    if args.progressive_every > 0 {
+        render_scene_progressive(&scene, &settings, args.progressive_every, |image, done| {
+            if let Err(err) = write_png(&args.out, image) {
+                eprintln!("failed to write png: {err}");
+            } else {
+                eprintln!("render: wrote {} spp to {:?}", done, args.out);
+            }
+        });
+        Ok(())
+    } else {
+        let image = render_scene(&scene, &settings);
+        write_png(&args.out, &image).map_err(|err| anyhow!("failed to write png: {err}"))?;
+        Ok(())
+    }
 }
 
 fn write_json<T: serde::Serialize>(path: &PathBuf, value: &T) -> Result<()> {
