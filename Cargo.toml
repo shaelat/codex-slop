@@ -1,0 +1,9 @@
+[workspace]
+members = [
+  "apps/ptroute",
+  "crates/ptroute-model",
+  "crates/ptroute-trace",
+  "crates/ptroute-graph",
+  "crates/ptroute-render",
+]
+resolver = "2"
