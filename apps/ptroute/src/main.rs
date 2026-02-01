@@ -77,15 +77,6 @@ struct LayoutArgs {
 
     #[arg(long, default_value_t = 1)]
     seed: u64,
-
-    #[arg(long, default_value_t = 32)]
-    progress_every: u32,
-
-    #[arg(long, default_value_t = 0)]
-    threads: usize,
-
-    #[arg(long, default_value_t = 0)]
-    progressive_every: u32,
 }
 
 #[derive(Args)]
@@ -247,14 +238,24 @@ fn run_render(args: RenderArgs) -> Result<()> {
     }
 
     if args.progressive_every > 0 {
+        let mut write_error: Option<anyhow::Error> = None;
         render_scene_progressive(&scene, &settings, args.progressive_every, |image, done| {
-            if let Err(err) = write_png(&args.out, image) {
-                eprintln!("failed to write png: {err}");
-            } else {
-                eprintln!("render: wrote {} spp to {:?}", done, args.out);
+            if write_error.is_some() {
+                return;
             }
+
+            match write_png(&args.out, image) {
+                Ok(()) => eprintln!("render: wrote {} spp to {:?}", done, args.out),
+                Err(err) => {
+                    write_error = Some(anyhow!("failed to write png: {err}"));
+                }
+            };
         });
-        Ok(())
+        if let Some(err) = write_error {
+            Err(err)
+        } else {
+            Ok(())
+        }
     } else {
         let image = render_scene(&scene, &settings);
         write_png(&args.out, &image).map_err(|err| anyhow!("failed to write png: {err}"))?;
