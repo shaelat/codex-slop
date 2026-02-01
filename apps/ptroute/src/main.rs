@@ -92,6 +92,15 @@ struct RenderArgs {
 
     #[arg(long, default_value_t = 900)]
     height: u32,
+
+    #[arg(long, default_value_t = 64)]
+    spp: u32,
+
+    #[arg(long, default_value_t = 6)]
+    bounces: u32,
+
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
 }
 
 fn main() {
@@ -205,6 +214,9 @@ fn run_render(args: RenderArgs) -> Result<()> {
     let settings = RenderSettings {
         width: args.width,
         height: args.height,
+        spp: args.spp,
+        bounces: args.bounces,
+        seed: args.seed,
     };
 
     let image = render_scene(&scene, &settings);
