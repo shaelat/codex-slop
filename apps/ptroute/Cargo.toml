@@ -4,4 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.86"
+chrono = { version = "0.4.38", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5.0", features = ["derive"] }
+ptroute-model = { path = "../../crates/ptroute-model" }
+ptroute-trace = { path = "../../crates/ptroute-trace" }
+serde_json = "1.0.114"

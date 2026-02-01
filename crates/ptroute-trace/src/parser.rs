@@ -8,8 +8,17 @@ pub struct ParsedTraceRun {
 }
 
 pub fn parse_traceroute_n(text: &str) -> Result<ParsedTraceRun> {
+    parse_traceroute_n_inner(text, None)
+}
+
+pub fn parse_traceroute_n_with_target(text: &str, fallback_target: &str) -> Result<ParsedTraceRun> {
+    parse_traceroute_n_inner(text, Some(fallback_target))
+}
+
+fn parse_traceroute_n_inner(text: &str, fallback_target: Option<&str>) -> Result<ParsedTraceRun> {
     let mut target: Option<String> = None;
     let mut hops = Vec::new();
+    let mut current_hop: Option<usize> = None;
 
     for line in text.lines() {
         let line = line.trim();
@@ -24,16 +33,37 @@ pub fn parse_traceroute_n(text: &str) -> Result<ParsedTraceRun> {
             continue;
         }
 
-        let first = line.chars().next().unwrap_or(' ');
-        if !first.is_ascii_digit() {
+        let mut tokens = line.split_whitespace();
+        let first_token = match tokens.next() {
+            Some(token) => token,
+            None => continue,
+        };
+
+        if first_token.chars().all(|c| c.is_ascii_digit()) {
+            let hop = parse_hop_line(line)?;
+            hops.push(hop);
+            current_hop = Some(hops.len() - 1);
             continue;
         }
 
-        let hop = parse_hop_line(line)?;
-        hops.push(hop);
+        if let Some(index) = current_hop {
+            if is_probe_start(first_token) {
+                let rest: Vec<&str> = std::iter::once(first_token)
+                    .chain(tokens)
+                    .collect();
+                let hop = &mut hops[index];
+                append_probe_tokens(&rest, &mut hop.ip, &mut hop.rtt_ms);
+            }
+        }
     }
 
-    let target = target.ok_or_else(|| anyhow!("missing target in traceroute output"))?;
+    let target = match target {
+        Some(value) => value,
+        None => fallback_target
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.to_string())
+            .ok_or_else(|| anyhow!("missing target in traceroute output"))?,
+    };
 
     Ok(ParsedTraceRun { target, hops })
 }
@@ -77,7 +107,13 @@ fn parse_hop_line(line: &str) -> Result<Hop> {
     let mut ip: Option<String> = None;
     let mut rtt_ms: Vec<Option<f64>> = Vec::new();
 
-    let mut i = 1;
+    append_probe_tokens(&tokens[1..], &mut ip, &mut rtt_ms);
+
+    Ok(Hop { ttl, ip, rtt_ms })
+}
+
+fn append_probe_tokens(tokens: &[&str], ip: &mut Option<String>, rtt_ms: &mut Vec<Option<f64>>) {
+    let mut i = 0;
     while i < tokens.len() {
         let tok = tokens[i];
 
@@ -94,7 +130,7 @@ fn parse_hop_line(line: &str) -> Result<Hop> {
 
         if is_ip_token(tok) {
             if ip.is_none() {
-                ip = Some(tok.to_string());
+                *ip = Some(tok.to_string());
             }
             i += 1;
             continue;
@@ -109,8 +145,10 @@ fn parse_hop_line(line: &str) -> Result<Hop> {
 
         i += 1;
     }
+}
 
-    Ok(Hop { ttl, ip, rtt_ms })
+fn is_probe_start(token: &str) -> bool {
+    token == "*" || is_ip_token(token)
 }
 
 fn is_ip_token(token: &str) -> bool {
@@ -179,5 +217,13 @@ mod tests {
     fn parse_target_from_header() {
         let line = "traceroute to 1.1.1.1 (1.1.1.1), 30 hops max";
         assert_eq!(parse_target(line), Some("1.1.1.1".to_string()));
+    }
+
+    #[test]
+    fn parse_uses_fallback_target() {
+        let text = "1  192.168.1.1  1.0 ms  1.1 ms  1.2 ms";
+        let run = parse_traceroute_n_with_target(text, "9.9.9.9").unwrap();
+        assert_eq!(run.target, "9.9.9.9");
+        assert_eq!(run.hops.len(), 1);
     }
 }

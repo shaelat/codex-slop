@@ -64,3 +64,30 @@ fn parse_multi_ip_per_hop() {
     assert_eq!(run.hops[0].rtt_ms.len(), 3);
     assert_eq!(run.hops[1].ip.as_deref(), Some("198.51.100.10"));
 }
+
+#[test]
+fn parse_ignores_non_ttl_lines() {
+    let text = r#"traceroute to 1.1.1.1 (1.1.1.1), 30 hops max
+108.162.243.33  10.0 ms  10.1 ms  10.2 ms
+ 1  192.168.1.1  1.0 ms  1.1 ms  1.2 ms
+"#;
+
+    let run = parse_traceroute_n(text).unwrap();
+    assert_eq!(run.target, "1.1.1.1");
+    assert_eq!(run.hops.len(), 1);
+    assert_eq!(run.hops[0].ttl, 1);
+}
+
+#[test]
+fn parse_continuation_lines() {
+    let text = include_str!("fixtures/traceroute_macos_continuation_1.txt");
+    let run = parse_traceroute_n(text).unwrap();
+
+    assert_eq!(run.target, "1.1.1.1");
+    assert_eq!(run.hops.len(), 4);
+    assert_eq!(run.hops[1].ttl, 12);
+    assert_eq!(run.hops[1].ip.as_deref(), Some("108.162.243.1"));
+    assert_eq!(run.hops[1].rtt_ms.len(), 3);
+    assert_eq!(run.hops[2].ttl, 13);
+    assert_eq!(run.hops[2].rtt_ms.len(), 3);
+}

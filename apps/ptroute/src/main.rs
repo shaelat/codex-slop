@@ -1,4 +1,12 @@
+use anyhow::{anyhow, Result};
+use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand};
+use ptroute_model::{TraceFile, TraceRun};
+use ptroute_trace::{parse_traceroute_n_with_target, run_traceroute, TraceSettings};
+use std::fs;
+use std::path::PathBuf;
+use std::thread::sleep;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "ptroute", version, about = "PathTraceRoute CLI")]
@@ -15,7 +23,37 @@ enum Commands {
 }
 
 #[derive(Args)]
-struct TraceArgs {}
+#[command(
+    about = "Run traceroute in numeric mode. Only target networks you own or have permission to test."
+)]
+struct TraceArgs {
+    #[arg(long)]
+    targets: Option<PathBuf>,
+
+    #[arg(long = "target")]
+    target_list: Vec<String>,
+
+    #[arg(long)]
+    out: PathBuf,
+
+    #[arg(long, default_value_t = 30)]
+    max_hops: u32,
+
+    #[arg(long, default_value_t = 3)]
+    probes: u32,
+
+    #[arg(long, default_value_t = 2000)]
+    timeout_ms: u64,
+
+    #[arg(long, default_value_t = 4)]
+    concurrency: usize,
+
+    #[arg(long, default_value_t = 1)]
+    repeat: u32,
+
+    #[arg(long, default_value_t = 0)]
+    interval_ms: u64,
+}
 
 #[derive(Args)]
 struct BuildArgs {}
@@ -24,11 +62,103 @@ struct BuildArgs {}
 struct RenderArgs {}
 
 fn main() {
+    if let Err(err) = run() {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Trace(_) => println!("not implemented"),
-        Commands::Build(_) => println!("not implemented"),
-        Commands::Render(_) => println!("not implemented"),
+        Commands::Trace(args) => run_trace(args),
+        Commands::Build(_) => {
+            println!("not implemented");
+            Ok(())
+        }
+        Commands::Render(_) => {
+            println!("not implemented");
+            Ok(())
+        }
     }
+}
+
+fn run_trace(args: TraceArgs) -> Result<()> {
+    let mut targets: Vec<String> = Vec::new();
+
+    if let Some(path) = args.targets {
+        let contents = fs::read_to_string(&path)
+            .map_err(|err| anyhow!("failed to read targets file {:?}: {}", path, err))?;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            targets.push(trimmed.to_string());
+        }
+    }
+
+    targets.extend(args.target_list);
+
+    if targets.is_empty() {
+        return Err(anyhow!(
+            "no targets provided (use --targets or --target)"
+        ));
+    }
+
+    if args.concurrency > 1 {
+        eprintln!("warning: --concurrency is not implemented yet; running sequentially");
+    }
+
+    let settings = TraceSettings {
+        max_hops: args.max_hops,
+        probes: args.probes,
+        timeout_ms: args.timeout_ms,
+    };
+
+    let mut runs: Vec<TraceRun> = Vec::new();
+
+    for target in targets {
+        for rep in 0..args.repeat {
+            match run_traceroute(&target, &settings) {
+                Ok(raw) => match parse_traceroute_n_with_target(&raw, &target) {
+                    Ok(parsed) => {
+                        let timestamp_utc =
+                            Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+                        runs.push(TraceRun {
+                            target: parsed.target,
+                            timestamp_utc,
+                            hops: parsed.hops,
+                        });
+                    }
+                    Err(err) => {
+                        eprintln!("failed to parse traceroute for {target}: {err}");
+                    }
+                },
+                Err(err) => {
+                    eprintln!("traceroute failed for {target}: {err}");
+                }
+            }
+
+            if args.interval_ms > 0 && rep + 1 < args.repeat {
+                sleep(Duration::from_millis(args.interval_ms));
+            }
+        }
+    }
+
+    if let Some(parent) = args.out.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|err| {
+                anyhow!("failed to create output directory {:?}: {}", parent, err)
+            })?;
+        }
+    }
+
+    let trace_file = TraceFile { version: 1, runs };
+    let json = serde_json::to_string_pretty(&trace_file)?;
+    fs::write(&args.out, json)
+        .map_err(|err| anyhow!("failed to write output {:?}: {}", args.out, err))?;
+
+    Ok(())
 }
