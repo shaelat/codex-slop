@@ -3,6 +3,7 @@ use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand};
 use ptroute_graph::{build_graph, layout_graph};
 use ptroute_model::{SceneFile, TraceFile, TraceRun};
+use ptroute_render::{render_scene, write_png, RenderSettings};
 use ptroute_trace::{parse_traceroute_n_with_target, run_traceroute, TraceSettings};
 use std::fs;
 use std::path::PathBuf;
@@ -85,6 +86,12 @@ struct RenderArgs {
 
     #[arg(long)]
     out: PathBuf,
+
+    #[arg(long, default_value_t = 1600)]
+    width: u32,
+
+    #[arg(long, default_value_t = 900)]
+    height: u32,
 }
 
 fn main() {
@@ -101,10 +108,7 @@ fn run() -> Result<()> {
         Commands::Trace(args) => run_trace(args),
         Commands::Build(args) => run_build(args),
         Commands::Layout(args) => run_layout(args),
-        Commands::Render(_) => {
-            println!("not implemented");
-            Ok(())
-        }
+        Commands::Render(args) => run_render(args),
     }
 }
 
@@ -190,6 +194,28 @@ fn run_layout(args: LayoutArgs) -> Result<()> {
         .map_err(|err| anyhow!("failed to parse graph {:?}: {}", args.in_path, err))?;
     let scene: SceneFile = layout_graph(&graph, args.seed);
     write_json(&args.out, &scene)
+}
+
+fn run_render(args: RenderArgs) -> Result<()> {
+    let contents = fs::read_to_string(&args.in_path)
+        .map_err(|err| anyhow!("failed to read input {:?}: {}", args.in_path, err))?;
+    let scene: SceneFile = serde_json::from_str(&contents)
+        .map_err(|err| anyhow!("failed to parse scene {:?}: {}", args.in_path, err))?;
+
+    let settings = RenderSettings {
+        width: args.width,
+        height: args.height,
+    };
+
+    let image = render_scene(&scene, &settings);
+    if let Some(parent) = args.out.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|err| anyhow!("failed to create output directory {:?}: {}", parent, err))?;
+        }
+    }
+    write_png(&args.out, &image).map_err(|err| anyhow!("failed to write png: {err}"))?;
+    Ok(())
 }
 
 fn write_json<T: serde::Serialize>(path: &PathBuf, value: &T) -> Result<()> {
