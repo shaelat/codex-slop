@@ -7,6 +7,9 @@ use ptroute_model::SceneFile;
 pub struct RenderSettings {
     pub width: u32,
     pub height: u32,
+    pub spp: u32,
+    pub bounces: u32,
+    pub seed: u64,
 }
 
 pub fn render_scene(scene: &SceneFile, settings: &RenderSettings) -> RgbImage {
@@ -14,14 +17,20 @@ pub fn render_scene(scene: &SceneFile, settings: &RenderSettings) -> RgbImage {
     let camera = build_camera(scene, settings);
     let mut image = RgbImage::new(settings.width, settings.height);
 
-    let light_dir = Vec3::new(-0.6, 1.0, -0.4).normalized();
+    let spp = settings.spp.max(1);
+    let bounces = settings.bounces.max(1);
 
     for y in 0..settings.height {
-        let v = (y as f32 + 0.5) / settings.height as f32;
         for x in 0..settings.width {
-            let u = (x as f32 + 0.5) / settings.width as f32;
-            let ray = camera.ray(u, 1.0 - v);
-            let color = shade(&ray, &spheres, light_dir);
+            let mut color = Vec3::zero();
+            for sample in 0..spp {
+                let mut rng = Rng::new(hash_seed(settings.seed, x, y, sample));
+                let u = (x as f32 + rng.next_f32()) / settings.width as f32;
+                let v = (y as f32 + rng.next_f32()) / settings.height as f32;
+                let ray = camera.ray(u, 1.0 - v);
+                color = color + trace(&ray, &spheres, bounces, &mut rng);
+            }
+            let color = color / spp as f32;
             image.put_pixel(x, y, to_rgb(color));
         }
     }
@@ -29,14 +38,46 @@ pub fn render_scene(scene: &SceneFile, settings: &RenderSettings) -> RgbImage {
     image
 }
 
-fn shade(ray: &Ray, spheres: &[Sphere], light_dir: Vec3) -> Vec3 {
-    if let Some(hit) = closest_hit(ray, spheres) {
-        let diffuse = hit.normal.dot(light_dir).max(0.0);
-        let ambient = 0.2;
-        let lighting = ambient + diffuse * 0.8;
-        hit.albedo * lighting
-    } else {
-        background(ray)
+fn trace(ray: &Ray, spheres: &[Sphere], bounces: u32, rng: &mut Rng) -> Vec3 {
+    let mut current_ray = *ray;
+    let mut throughput = Vec3::new(1.0, 1.0, 1.0);
+    let mut color = Vec3::zero();
+
+    for _ in 0..bounces {
+        if let Some(hit) = closest_hit(&current_ray, spheres) {
+            let direction = random_in_hemisphere(hit.normal, rng);
+            current_ray = Ray {
+                origin: hit.point + hit.normal * 0.001,
+                direction,
+            };
+            throughput = throughput.mul_elem(hit.albedo);
+        } else {
+            color = color + throughput.mul_elem(background(&current_ray));
+            return color;
+        }
+    }
+
+    color
+}
+
+fn random_in_hemisphere(normal: Vec3, rng: &mut Rng) -> Vec3 {
+    let mut dir = random_unit_vector(rng);
+    if dir.dot(normal) < 0.0 {
+        dir = dir * -1.0;
+    }
+    (normal + dir).normalized()
+}
+
+fn random_unit_vector(rng: &mut Rng) -> Vec3 {
+    loop {
+        let p = Vec3::new(
+            rng.next_f32() * 2.0 - 1.0,
+            rng.next_f32() * 2.0 - 1.0,
+            rng.next_f32() * 2.0 - 1.0,
+        );
+        if p.dot(p) < 1.0 {
+            return p.normalized();
+        }
     }
 }
 
@@ -123,4 +164,36 @@ fn to_rgb(color: Vec3) -> Rgb<u8> {
         (gamma.y * 255.0) as u8,
         (gamma.z * 255.0) as u8,
     ])
+}
+
+fn hash_seed(seed: u64, x: u32, y: u32, sample: u32) -> u64 {
+    let mut v = seed ^ ((x as u64) << 32) ^ ((y as u64) << 16) ^ sample as u64;
+    v = v.wrapping_add(0x9e3779b97f4a7c15);
+    v = (v ^ (v >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    v = (v ^ (v >> 27)).wrapping_mul(0x94d049bb133111eb);
+    v ^ (v >> 31)
+}
+
+struct Rng {
+    state: u64,
+}
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        let state = if seed == 0 { 0xdeadbeefcafebabe } else { seed };
+        Self { state }
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1);
+        (self.state >> 32) as u32
+    }
+
+    fn next_f32(&mut self) -> f32 {
+        let value = self.next_u32();
+        value as f32 / u32::MAX as f32
+    }
 }
