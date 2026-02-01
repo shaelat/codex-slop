@@ -1,6 +1,6 @@
 use blake3::Hasher;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use notify::{event::EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{event::EventKind, Config, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -8,6 +8,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
+use std::error::Error;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
@@ -24,24 +25,48 @@ struct Db {
 struct Args {
     root: PathBuf,
     db_path: PathBuf,
+    db_path_default: bool,
     ignore_patterns: Vec<String>,
     baseline_only: bool,
 }
 
-fn main() -> io::Result<()> {
+fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args()?;
 
     let root = args.root.canonicalize()?;
+    let db_path = if args.db_path_default {
+        root.join(".watch-hash.json")
+    } else if args.db_path.is_absolute() {
+        args.db_path
+    } else {
+        env::current_dir()?.join(args.db_path)
+    };
     let mut ignore_patterns = args.ignore_patterns;
 
-    if let Ok(rel) = args.db_path.strip_prefix(&root) {
+    if let Ok(rel) = db_path.strip_prefix(&root) {
         ignore_patterns.push(path_to_key(rel));
     }
 
     let ignore_set = build_globset(&ignore_patterns)?;
 
-    let mut db = if args.db_path.exists() {
-        load_db(&args.db_path)?
+    let mut db = if db_path.exists() {
+        match load_db(&db_path) {
+            Ok(db) => db,
+            Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+                eprintln!(
+                    "DB is invalid or empty, rebuilding baseline: {}",
+                    db_path.display()
+                );
+                Db {
+                    version: 1,
+                    root: root.to_string_lossy().to_string(),
+                    created_at: now_epoch_secs(),
+                    updated_at: now_epoch_secs(),
+                    hashes: BTreeMap::new(),
+                }
+            }
+            Err(err) => return Err(err.into()),
+        }
     } else {
         Db {
             version: 1,
@@ -56,21 +81,26 @@ fn main() -> io::Result<()> {
         println!("Building baseline for {}", root.display());
         db.hashes = scan_tree(&root, &ignore_set)?;
         db.updated_at = now_epoch_secs();
-        save_db(&args.db_path, &db)?;
+        save_db(&db_path, &db)?;
         if args.baseline_only {
-            println!("Baseline written to {}", args.db_path.display());
+            println!("Baseline written to {}", db_path.display());
             return Ok(());
         }
     }
 
     println!("Watching {}", root.display());
-    println!("DB: {}", args.db_path.display());
+    println!("DB: {}", db_path.display());
     if !ignore_patterns.is_empty() {
         println!("Ignore: {}", ignore_patterns.join(", "));
     }
 
     let (tx, rx) = channel();
-    let mut watcher: RecommendedWatcher = Watcher::new(tx, Duration::from_millis(250))?;
+    let mut watcher: RecommendedWatcher = RecommendedWatcher::new(
+        move |res| {
+            let _ = tx.send(res);
+        },
+        Config::default(),
+    )?;
     watcher.watch(&root, RecursiveMode::Recursive)?;
 
     loop {
@@ -78,7 +108,7 @@ fn main() -> io::Result<()> {
             Ok(Ok(event)) => {
                 if handle_event(&root, &ignore_set, &event, &mut db)? {
                     db.updated_at = now_epoch_secs();
-                    save_db(&args.db_path, &db)?;
+                    save_db(&db_path, &db)?;
                 }
             }
             Ok(Err(err)) => eprintln!("watch error: {err}"),
@@ -132,11 +162,13 @@ fn parse_args() -> io::Result<Args> {
     }
 
     let root = root.unwrap_or_else(|| PathBuf::from("."));
-    let db_path = db_path.unwrap_or_else(|| root.join(".watch-hash.json"));
+    let db_path_default = db_path.is_none();
+    let db_path = db_path.unwrap_or_else(|| PathBuf::from(".watch-hash.json"));
 
     Ok(Args {
         root,
         db_path,
+        db_path_default,
         ignore_patterns,
         baseline_only,
     })
@@ -342,4 +374,3 @@ fn save_db(path: &Path, db: &Db) -> io::Result<()> {
         .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
     file.write_all(data.as_bytes())
 }
-
