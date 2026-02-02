@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand};
+use crossterm::{cursor, event, execute, terminal};
 use ptroute_graph::{build_graph, layout_graph};
 use ptroute_model::{SceneFile, TraceFile, TraceRun};
 use ptroute_render::{render_scene, render_scene_progressive, write_png, RenderSettings};
@@ -8,8 +9,11 @@ use ptroute_trace::{run_traces, TraceJobResult, TraceSettings};
 use serde::Serialize;
 use std::fs;
 use std::io::Write;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
@@ -27,6 +31,7 @@ enum Commands {
     Render(RenderArgs),
     Run(RunArgs),
     Doctor(DoctorArgs),
+    Invade(InvadeArgs),
 }
 
 #[derive(Args)]
@@ -250,6 +255,69 @@ struct DoctorArgs {
     out_dir: PathBuf,
 }
 
+#[derive(Args)]
+struct InvadeArgs {
+    #[arg(long)]
+    targets: Option<PathBuf>,
+
+    #[arg(long = "target")]
+    target_list: Vec<String>,
+
+    #[arg(long, default_value_t = 30)]
+    max_hops: u32,
+
+    #[arg(long, default_value_t = 3)]
+    probes: u32,
+
+    #[arg(long, default_value_t = 2000)]
+    timeout_ms: u64,
+
+    #[arg(long, default_value_t = 4)]
+    concurrency: usize,
+
+    #[arg(long)]
+    watch: bool,
+
+    #[arg(long, default_value_t = 1)]
+    waves: u32,
+
+    #[arg(long, default_value_t = 2000)]
+    wave_interval_ms: u64,
+
+    #[arg(long, default_value_t = 80)]
+    refresh_ms: u64,
+
+    #[arg(long, default_value_t = 80.0)]
+    warn_rtt: f64,
+
+    #[arg(long, default_value_t = 200.0)]
+    bad_rtt: f64,
+
+    #[arg(long, default_value_t = 0.34)]
+    warn_loss: f64,
+
+    #[arg(long, default_value_t = 0.67)]
+    bad_loss: f64,
+
+    #[arg(long)]
+    plain: bool,
+
+    #[arg(long)]
+    ascii_only: bool,
+
+    #[arg(long)]
+    no_ansi: bool,
+
+    #[arg(long)]
+    save_traces: Option<PathBuf>,
+
+    #[arg(long)]
+    log_raw: bool,
+
+    #[arg(long)]
+    out_dir: Option<PathBuf>,
+}
+
 #[derive(Serialize)]
 struct RunArgsSummary {
     targets_file: Option<PathBuf>,
@@ -317,6 +385,7 @@ fn run() -> Result<()> {
         Commands::Render(args) => run_render(args),
         Commands::Run(args) => run_run(args),
         Commands::Doctor(args) => run_doctor(args),
+        Commands::Invade(args) => run_invade(args),
     }
 }
 
@@ -635,6 +704,127 @@ fn run_run(args: RunArgs) -> Result<()> {
     ui.done(&format!("elapsed {:.1}s", elapsed));
 
     Ok(())
+}
+
+fn run_invade(args: InvadeArgs) -> Result<()> {
+    let use_ansi = !args.no_ansi && io::stdout().is_terminal();
+    let interactive = use_ansi;
+
+    if !interactive {
+        let output = render_invade_demo(80, true);
+        println!("{output}");
+        return Ok(());
+    }
+
+    let running = Arc::new(AtomicBool::new(true));
+    let running_ctrlc = Arc::clone(&running);
+    ctrlc::set_handler(move || {
+        running_ctrlc.store(false, Ordering::SeqCst);
+    })
+    .map_err(|err| anyhow!("failed to install ctrl-c handler: {err}"))?;
+
+    let _guard = TermGuard::enter()?;
+
+    let (term_w, _) = terminal::size().unwrap_or((80, 24));
+    let demo = render_invade_demo(term_w, args.plain || args.ascii_only);
+    draw_frame(&demo)?;
+
+    while running.load(Ordering::SeqCst) {
+        if event::poll(std::time::Duration::from_millis(50))
+            .map_err(|err| anyhow!("event poll failed: {err}"))?
+        {
+            if let event::Event::Key(key) =
+                event::read().map_err(|err| anyhow!("event read failed: {err}"))?
+            {
+                if matches!(
+                    key.code,
+                    event::KeyCode::Char('q') | event::KeyCode::Char('Q')
+                ) {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn render_invade_demo(term_w: u16, plain: bool) -> String {
+    let mut lines = Vec::new();
+    let title = "PATH TRACEROUTE INVADERS";
+    let wave = "WAVE 1";
+    lines.push(center_line(title, term_w));
+    lines.push(center_line(wave, term_w));
+    lines.push("".to_string());
+
+    let legend = "OK=green WARN=yellow BAD=red UNKNOWN=dim";
+    lines.push(center_line(legend, term_w));
+    lines.push("".to_string());
+
+    let max_hops = 12;
+    let ttl_header = (1..=max_hops)
+        .map(|n| (n % 10).to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    lines.push(format!("TTL: {ttl_header}"));
+
+    let ship = "<^>";
+    let inv = if plain { "W" } else { "W" };
+    let row = (0..max_hops).map(|_| inv).collect::<Vec<_>>().join("-");
+
+    lines.push(format!("{ship} {row}  1.1.1.1"));
+    lines.push(format!("{ship} {row}  8.8.8.8"));
+    lines.push("".to_string());
+    lines.push("Last hop: demo/ttl=4 ip=10.0.0.1 rtt=12.3ms loss=0%".to_string());
+
+    lines.join(
+        "
+",
+    )
+}
+
+fn center_line(text: &str, width: u16) -> String {
+    let width = width as usize;
+    if text.len() >= width {
+        return text.to_string();
+    }
+    let pad = (width - text.len()) / 2;
+    format!("{}{}", " ".repeat(pad), text)
+}
+
+fn draw_frame(buffer: &str) -> Result<()> {
+    let mut stdout = io::stdout();
+    execute!(
+        stdout,
+        terminal::Clear(terminal::ClearType::All),
+        cursor::MoveTo(0, 0)
+    )
+    .map_err(|err| anyhow!("failed to clear screen: {err}"))?;
+    stdout
+        .write_all(buffer.as_bytes())
+        .map_err(|err| anyhow!("failed to write frame: {err}"))?;
+    stdout
+        .flush()
+        .map_err(|err| anyhow!("failed to flush: {err}"))?;
+    Ok(())
+}
+
+struct TermGuard;
+
+impl TermGuard {
+    fn enter() -> Result<Self> {
+        terminal::enable_raw_mode().map_err(|err| anyhow!("failed to enable raw mode: {err}"))?;
+        execute!(io::stdout(), terminal::EnterAlternateScreen, cursor::Hide)
+            .map_err(|err| anyhow!("failed to enter alt screen: {err}"))?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        let _ = execute!(io::stdout(), cursor::Show, terminal::LeaveAlternateScreen);
+        let _ = terminal::disable_raw_mode();
+    }
 }
 
 fn run_doctor(args: DoctorArgs) -> Result<()> {
