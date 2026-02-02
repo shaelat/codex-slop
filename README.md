@@ -16,6 +16,12 @@ Build the CLI:
 cargo build -p ptroute
 ```
 
+(Recommended) sanity-check your environment:
+
+```bash
+cargo run -p ptroute -- doctor --out-dir output
+```
+
 Create a targets file (one host/IP per line):
 
 ```text
@@ -23,15 +29,14 @@ Create a targets file (one host/IP per line):
 8.8.8.8
 ```
 
-Run the full pipeline:
+Run the full pipeline with one command:
 
 ```bash
-cargo run -p ptroute -- trace  --targets examples/targets.txt --out output/traces.json
-cargo run -p ptroute -- build  --in output/traces.json   --out output/graph.json
-cargo run -p ptroute -- layout --in output/graph.json    --out output/scene.json --seed 1
-cargo run -p ptroute -- render --in output/scene.json    --out output/render.png \
-  --width 1600 --height 900 --spp 200 --bounces 6 --seed 1
+cargo run -p ptroute -- run --targets examples/targets.txt --out-dir output/run1 \
+  --seed 1 --width 1600 --height 900 --spp 200 --bounces 6 --open
 ```
+
+If you omit `--out-dir`, ptroute will create `output/YYYYmmdd-HHMMSS/`.
 
 ## Requirements
 
@@ -47,7 +52,45 @@ Only run traceroute against networks and targets you own or have permission to t
 
 ## CLI overview
 
-### ptroute trace
+### ptroute run (primary)
+Orchestrates trace → build → layout → render and writes a run receipt.
+
+```bash
+ptroute run --targets examples/targets.txt --out-dir output/run1 --seed 1 \
+  --width 1600 --height 900 --spp 200 --bounces 6 --open
+```
+
+Outputs in `--out-dir`:
+- `traces.json`
+- `graph.json`
+- `scene.json`
+- `render.png`
+- `run.json`
+
+Behavior:
+- If `--out-dir` exists, ptroute fails unless you pass `--resume` or `--force`.
+- `--resume` skips completed steps (based on existing outputs).
+- `--force` re-runs all steps and overwrites outputs (atomically).
+- `--plain` disables ANSI color in the bootloader-style output.
+- `--open` opens `render.png` after completion (macOS/Linux).
+
+Key options:
+- Input: `--targets <file>`, `--target <host>` (repeatable)
+- Output: `--out-dir <dir>`, `--resume`, `--force`, `--plain`, `--open`
+- Trace: `--max-hops`, `--probes`, `--timeout-ms`, `--concurrency`, `--repeat`, `--interval-ms`
+- Render: `--width`, `--height`, `--spp`, `--bounces`, `--threads`, `--progress-every`, `--progressive-every`, `--seed`
+
+### ptroute doctor
+Checks OS support, traceroute availability, and output directory write access.
+
+```bash
+ptroute doctor --out-dir output
+```
+
+### Advanced: manual pipeline
+If you want individual steps, the original subcommands still work.
+
+#### ptroute trace
 Runs `traceroute -n` and writes `traces.json`.
 
 ```bash
@@ -62,18 +105,18 @@ Options:
 - `--max-hops <n>`: default 30.
 - `--probes <n>`: default 3.
 - `--timeout-ms <ms>`: default 2000.
-- `--concurrency <n>`: default 4 (currently not implemented; runs sequentially).
+- `--concurrency <n>`: default 4.
 - `--repeat <n>`: default 1 (multiple runs per target).
-- `--interval-ms <ms>`: default 0 (pause between repeats).
+- `--interval-ms <ms>`: default 0 (pause between repeats for the same target).
 
-### ptroute build
+#### ptroute build
 Consumes `traces.json`, produces `graph.json`.
 
 ```bash
 ptroute build --in output/traces.json --out output/graph.json
 ```
 
-### ptroute layout
+#### ptroute layout
 Consumes `graph.json`, produces `scene.json`.
 
 ```bash
@@ -84,7 +127,7 @@ Layout notes:
 - Deterministic for a given seed.
 - X axis approximates hop depth, Y groups nodes by degree bucket, Z adds stable jitter.
 
-### ptroute render
+#### ptroute render
 Consumes `scene.json`, produces `render.png`.
 
 ```bash
@@ -113,6 +156,7 @@ The pipeline produces JSON files plus a PNG:
 - `graph.json`: merged hop graph
 - `scene.json`: 3D positions for render
 - `render.png`: final image
+- `run.json`: run receipt (timestamps, args, outputs)
 
 High-level schema (see `crates/ptroute-model/src/lib.rs` for exact structs):
 
