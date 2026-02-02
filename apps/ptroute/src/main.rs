@@ -385,11 +385,8 @@ fn run_render(args: RenderArgs) -> Result<()> {
 fn run_run(args: RunArgs) -> Result<()> {
     let started_at_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
-    if args.resume {
-        eprintln!("warning: --resume is not implemented yet; running full pipeline");
-    }
-    if args.force {
-        eprintln!("warning: --force is not implemented yet; running full pipeline");
+    if args.force && args.resume {
+        eprintln!("warning: --force overrides --resume; re-running all steps");
     }
     if args.plain {
         eprintln!("warning: --plain is not implemented yet; output will be standard text");
@@ -397,7 +394,20 @@ fn run_run(args: RunArgs) -> Result<()> {
 
     let out_dir = args.out_dir.clone().unwrap_or_else(default_out_dir);
 
-    if !out_dir.exists() {
+    if out_dir.exists() {
+        if !out_dir.is_dir() {
+            return Err(anyhow!(
+                "output path {:?} exists and is not a directory",
+                out_dir
+            ));
+        }
+        if !args.force && !args.resume {
+            return Err(anyhow!(
+                "output directory {:?} already exists (use --resume or --force)",
+                out_dir
+            ));
+        }
+    } else {
         fs::create_dir_all(&out_dir)
             .map_err(|err| anyhow!("failed to create output directory {:?}: {}", out_dir, err))?;
     }
@@ -432,41 +442,68 @@ fn run_run(args: RunArgs) -> Result<()> {
         open: args.open,
     };
 
-    run_trace(TraceArgs {
-        targets: args.targets,
-        target_list: args.target_list,
-        out: traces_path.clone(),
-        max_hops: args.max_hops,
-        probes: args.probes,
-        timeout_ms: args.timeout_ms,
-        concurrency: args.concurrency,
-        repeat: args.repeat,
-        interval_ms: args.interval_ms,
-    })?;
+    let allow_skip = args.resume && !args.force;
+    let mut skipped = Vec::new();
 
-    run_build(BuildArgs {
-        in_path: traces_path.clone(),
-        out: graph_path.clone(),
-    })?;
+    let skip_trace = allow_skip && traces_path.exists();
+    if skip_trace {
+        skipped.push("trace");
+    } else {
+        run_trace(TraceArgs {
+            targets: args.targets,
+            target_list: args.target_list,
+            out: traces_path.clone(),
+            max_hops: args.max_hops,
+            probes: args.probes,
+            timeout_ms: args.timeout_ms,
+            concurrency: args.concurrency,
+            repeat: args.repeat,
+            interval_ms: args.interval_ms,
+        })?;
+    }
 
-    run_layout(LayoutArgs {
-        in_path: graph_path.clone(),
-        out: scene_path.clone(),
-        seed: args.seed,
-    })?;
+    let skip_build = allow_skip && graph_path.exists();
+    if skip_build {
+        skipped.push("build");
+    } else {
+        run_build(BuildArgs {
+            in_path: traces_path.clone(),
+            out: graph_path.clone(),
+        })?;
+    }
 
-    run_render(RenderArgs {
-        in_path: scene_path.clone(),
-        out: render_path.clone(),
-        width: args.width,
-        height: args.height,
-        spp: args.spp,
-        bounces: args.bounces,
-        seed: args.seed,
-        progress_every: args.progress_every,
-        threads: args.threads,
-        progressive_every: args.progressive_every,
-    })?;
+    let skip_layout = allow_skip && scene_path.exists();
+    if skip_layout {
+        skipped.push("layout");
+    } else {
+        run_layout(LayoutArgs {
+            in_path: graph_path.clone(),
+            out: scene_path.clone(),
+            seed: args.seed,
+        })?;
+    }
+
+    let skip_render = allow_skip && render_path.exists();
+    if skip_render {
+        skipped.push("render");
+    } else {
+        run_render(RenderArgs {
+            in_path: scene_path.clone(),
+            out: render_path.clone(),
+            width: args.width,
+            height: args.height,
+            spp: args.spp,
+            bounces: args.bounces,
+            seed: args.seed,
+            progress_every: args.progress_every,
+            threads: args.threads,
+            progressive_every: args.progressive_every,
+        })?;
+    }
+
+    if !skipped.is_empty() {
+        eprintln!("resume: skipped {}", skipped.join(", "));
+    }
 
     let finished_at_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let receipt = RunReceipt {
@@ -489,7 +526,7 @@ fn run_run(args: RunArgs) -> Result<()> {
 
     write_json(&run_path, &receipt)?;
 
-    if args.open {
+    if args.open && render_path.exists() {
         open_file(&render_path)?;
     }
 
