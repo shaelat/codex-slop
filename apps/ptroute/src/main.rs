@@ -182,6 +182,68 @@ struct RunArgs {
     open: bool,
 }
 
+#[derive(Clone, Copy)]
+enum UiMode {
+    Plain,
+    Retro,
+}
+
+impl UiMode {
+    fn use_color(self) -> bool {
+        matches!(self, UiMode::Retro)
+    }
+}
+
+struct Ui {
+    mode: UiMode,
+}
+
+impl Ui {
+    fn new(plain: bool) -> Self {
+        Self {
+            mode: if plain { UiMode::Plain } else { UiMode::Retro },
+        }
+    }
+
+    fn banner(&self) {
+        if self.mode.use_color() {
+            eprintln!(
+                "[36m[BOOT][0m PathTraceRoute Loader v{}",
+                env!("CARGO_PKG_VERSION")
+            );
+        } else {
+            eprintln!(
+                "[BOOT] PathTraceRoute Loader v{}",
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+    }
+
+    fn step_ok(&self, step: &str, detail: &str) {
+        if self.mode.use_color() {
+            eprintln!("[32m[OK ][0m {step}  {detail}");
+        } else {
+            eprintln!("[OK ] {step}  {detail}");
+        }
+    }
+
+    fn step_skip(&self, step: &str, detail: &str) {
+        if self.mode.use_color() {
+            eprintln!("[33m[SKIP][0m {step}  {detail}");
+        } else {
+            eprintln!("[SKIP] {step}  {detail}");
+        }
+    }
+
+    fn done(&self, detail: &str) {
+        if self.mode.use_color() {
+            eprintln!("[35m[DONE][0m {detail}");
+        } else {
+            eprintln!("[DONE] {detail}");
+        }
+    }
+}
+
 #[derive(Args)]
 struct DoctorArgs {
     #[arg(long, default_value = "output")]
@@ -388,7 +450,11 @@ fn run_render(args: RenderArgs) -> Result<()> {
 }
 
 fn run_run(args: RunArgs) -> Result<()> {
+    let started = SystemTime::now();
     let started_at_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let ui = Ui::new(args.plain);
+
+    ui.banner();
 
     if args.force && args.resume {
         eprintln!("warning: --force overrides --resume; re-running all steps");
@@ -448,11 +514,10 @@ fn run_run(args: RunArgs) -> Result<()> {
     };
 
     let allow_skip = args.resume && !args.force;
-    let mut skipped = Vec::new();
 
     let skip_trace = allow_skip && traces_path.exists();
     if skip_trace {
-        skipped.push("trace");
+        ui.step_skip("trace ", &format!("{}", traces_path.display()));
     } else {
         run_trace(TraceArgs {
             targets: args.targets,
@@ -465,32 +530,55 @@ fn run_run(args: RunArgs) -> Result<()> {
             repeat: args.repeat,
             interval_ms: args.interval_ms,
         })?;
+        ui.step_ok(
+            "trace ",
+            &format!(
+                "{} ({} target(s), repeat {})",
+                traces_path.display(),
+                args_summary.targets.len(),
+                args.repeat
+            ),
+        );
     }
 
     let skip_build = allow_skip && graph_path.exists();
     if skip_build {
-        skipped.push("build");
+        ui.step_skip("build ", &format!("{}", graph_path.display()));
     } else {
         run_build(BuildArgs {
             in_path: traces_path.clone(),
             out: graph_path.clone(),
         })?;
+        let (nodes, edges) = graph_counts(&graph_path);
+        ui.step_ok(
+            "build ",
+            &format!(
+                "{} (nodes {}, edges {})",
+                graph_path.display(),
+                nodes,
+                edges
+            ),
+        );
     }
 
     let skip_layout = allow_skip && scene_path.exists();
     if skip_layout {
-        skipped.push("layout");
+        ui.step_skip("layout", &format!("{}", scene_path.display()));
     } else {
         run_layout(LayoutArgs {
             in_path: graph_path.clone(),
             out: scene_path.clone(),
             seed: args.seed,
         })?;
+        ui.step_ok(
+            "layout",
+            &format!("{} (seed {})", scene_path.display(), args.seed),
+        );
     }
 
     let skip_render = allow_skip && render_path.exists();
     if skip_render {
-        skipped.push("render");
+        ui.step_skip("render", &format!("{}", render_path.display()));
     } else {
         run_render(RenderArgs {
             in_path: scene_path.clone(),
@@ -504,10 +592,18 @@ fn run_run(args: RunArgs) -> Result<()> {
             threads: args.threads,
             progressive_every: args.progressive_every,
         })?;
-    }
-
-    if !skipped.is_empty() {
-        eprintln!("resume: skipped {}", skipped.join(", "));
+        ui.step_ok(
+            "render",
+            &format!(
+                "{} ({}x{}, spp {}, bounces {}, threads {})",
+                render_path.display(),
+                args.width,
+                args.height,
+                args.spp,
+                args.bounces,
+                args.threads
+            ),
+        );
     }
 
     let finished_at_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -534,6 +630,9 @@ fn run_run(args: RunArgs) -> Result<()> {
     if args.open && render_path.exists() {
         open_file(&render_path)?;
     }
+
+    let elapsed = started.elapsed().unwrap_or_default().as_secs_f64();
+    ui.done(&format!("elapsed {:.1}s", elapsed));
 
     Ok(())
 }
@@ -603,6 +702,15 @@ fn run_doctor(args: DoctorArgs) -> Result<()> {
     } else {
         Err(anyhow!("doctor found issues"))
     }
+}
+
+fn graph_counts(path: &PathBuf) -> (usize, usize) {
+    if let Ok(contents) = fs::read_to_string(path) {
+        if let Ok(graph) = serde_json::from_str::<ptroute_model::GraphFile>(&contents) {
+            return (graph.nodes.len(), graph.edges.len());
+        }
+    }
+    (0, 0)
 }
 
 fn default_out_dir() -> PathBuf {
