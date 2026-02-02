@@ -38,6 +38,21 @@ cargo run -p ptroute -- run --targets examples/targets.txt --out-dir output/run1
 
 If you omit `--out-dir`, ptroute will create `output/YYYYmmdd-HHMMSS/`.
 
+## Workflow changes (M1–M6)
+
+The recommended workflow is now a single command:
+- Use `ptroute run` as the default entrypoint (replaces the 4-command manual pipeline).
+- Use `ptroute doctor` before the first run to verify traceroute + output permissions.
+
+Key implications for users:
+- **Atomic outputs:** JSON and PNG files are written via temp + rename to avoid corruption.
+- **Resumable runs:** `--resume` skips completed steps; `--force` re-runs everything.
+- **Deterministic output structure:** `run.json` captures version, timestamps, args, and output paths.
+- **Real concurrency:** `--concurrency` now controls parallel traceroute execution while preserving stable ordering.
+- **Bootloader-style progress:** `ptroute run` prints [BOOT]/[OK]/[SKIP]/[DONE]; use `--plain` to disable ANSI.
+
+The original `trace / build / layout / render` subcommands still work for advanced use.
+
 ## Requirements
 
 - Rust toolchain (stable).
