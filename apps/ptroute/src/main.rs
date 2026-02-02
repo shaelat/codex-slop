@@ -4,14 +4,13 @@ use clap::{Args, Parser, Subcommand};
 use ptroute_graph::{build_graph, layout_graph};
 use ptroute_model::{SceneFile, TraceFile, TraceRun};
 use ptroute_render::{render_scene, render_scene_progressive, write_png, RenderSettings};
-use ptroute_trace::{parse_traceroute_n_with_target, run_traceroute, TraceSettings};
+use ptroute_trace::{run_traces, TraceJobResult, TraceSettings};
 use serde::Serialize;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
-use std::thread::sleep;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(name = "ptroute", version, about = "PathTraceRoute CLI")]
@@ -254,7 +253,7 @@ fn run() -> Result<()> {
 fn run_trace(args: TraceArgs) -> Result<()> {
     let mut targets: Vec<String> = Vec::new();
 
-    if let Some(path) = args.targets {
+    if let Some(path) = args.targets.clone() {
         let contents = fs::read_to_string(&path)
             .map_err(|err| anyhow!("failed to read targets file {:?}: {}", path, err))?;
         for line in contents.lines() {
@@ -266,14 +265,10 @@ fn run_trace(args: TraceArgs) -> Result<()> {
         }
     }
 
-    targets.extend(args.target_list);
+    targets.extend(args.target_list.clone());
 
     if targets.is_empty() {
         return Err(anyhow!("no targets provided (use --targets or --target)"));
-    }
-
-    if args.concurrency > 1 {
-        eprintln!("warning: --concurrency is not implemented yet; running sequentially");
     }
 
     let settings = TraceSettings {
@@ -282,31 +277,33 @@ fn run_trace(args: TraceArgs) -> Result<()> {
         timeout_ms: args.timeout_ms,
     };
 
+    let results = run_traces(
+        &targets,
+        &settings,
+        args.repeat,
+        args.interval_ms,
+        args.concurrency,
+    );
+
     let mut runs: Vec<TraceRun> = Vec::new();
 
-    for target in targets {
-        for rep in 0..args.repeat {
-            match run_traceroute(&target, &settings) {
-                Ok(raw) => match parse_traceroute_n_with_target(&raw, &target) {
-                    Ok(parsed) => {
-                        let timestamp_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-                        runs.push(TraceRun {
-                            target: parsed.target,
-                            timestamp_utc,
-                            hops: parsed.hops,
-                        });
-                    }
-                    Err(err) => {
-                        eprintln!("failed to parse traceroute for {target}: {err}");
-                    }
-                },
-                Err(err) => {
-                    eprintln!("traceroute failed for {target}: {err}");
-                }
+    for TraceJobResult {
+        target: _,
+        repeat: _,
+        result,
+    } in results
+    {
+        match result {
+            Ok(parsed) => {
+                let timestamp_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+                runs.push(TraceRun {
+                    target: parsed.target,
+                    timestamp_utc,
+                    hops: parsed.hops,
+                });
             }
-
-            if args.interval_ms > 0 && rep + 1 < args.repeat {
-                sleep(Duration::from_millis(args.interval_ms));
+            Err(message) => {
+                eprintln!("{message}");
             }
         }
     }
