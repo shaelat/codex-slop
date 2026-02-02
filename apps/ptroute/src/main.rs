@@ -26,6 +26,7 @@ enum Commands {
     Layout(LayoutArgs),
     Render(RenderArgs),
     Run(RunArgs),
+    Doctor(DoctorArgs),
 }
 
 #[derive(Args)]
@@ -181,6 +182,12 @@ struct RunArgs {
     open: bool,
 }
 
+#[derive(Args)]
+struct DoctorArgs {
+    #[arg(long, default_value = "output")]
+    out_dir: PathBuf,
+}
+
 #[derive(Serialize)]
 struct RunArgsSummary {
     targets_file: Option<PathBuf>,
@@ -247,6 +254,7 @@ fn run() -> Result<()> {
         Commands::Layout(args) => run_layout(args),
         Commands::Render(args) => run_render(args),
         Commands::Run(args) => run_run(args),
+        Commands::Doctor(args) => run_doctor(args),
     }
 }
 
@@ -528,6 +536,73 @@ fn run_run(args: RunArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_doctor(args: DoctorArgs) -> Result<()> {
+    let mut ok = true;
+
+    if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+        eprintln!("[OK ] os: tracing supported");
+    } else {
+        eprintln!("[FAIL] os: tracing unsupported (macOS/Linux only)");
+        eprintln!("       tip: you can still use build/layout/render with existing traces.json");
+        ok = false;
+    }
+
+    match Command::new("traceroute")
+        .arg("-n")
+        .arg("-m")
+        .arg("1")
+        .arg("127.0.0.1")
+        .output()
+    {
+        Ok(output) => {
+            if output.status.success() {
+                eprintln!("[OK ] traceroute: available");
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!("[FAIL] traceroute: command failed");
+                if !stderr.trim().is_empty() {
+                    eprintln!("       details: {}", stderr.trim());
+                }
+                eprintln!(
+                    "       tip: install traceroute (e.g., apt/yum/pacman install traceroute)"
+                );
+                ok = false;
+            }
+        }
+        Err(_) => {
+            eprintln!("[FAIL] traceroute: not found on PATH");
+            eprintln!("       tip: install traceroute (e.g., apt/yum/pacman install traceroute)");
+            ok = false;
+        }
+    }
+
+    if let Err(err) = fs::create_dir_all(&args.out_dir) {
+        eprintln!("[FAIL] output dir: {:?} ({})", args.out_dir, err);
+        ok = false;
+    } else {
+        let probe = args.out_dir.join(".ptroute-write-test");
+        match fs::write(&probe, b"ok") {
+            Ok(_) => {
+                let _ = fs::remove_file(&probe);
+                eprintln!("[OK ] output dir: writable ({:?})", args.out_dir);
+            }
+            Err(err) => {
+                eprintln!(
+                    "[FAIL] output dir: {:?} not writable ({})",
+                    args.out_dir, err
+                );
+                ok = false;
+            }
+        }
+    }
+
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!("doctor found issues"))
+    }
 }
 
 fn default_out_dir() -> PathBuf {
