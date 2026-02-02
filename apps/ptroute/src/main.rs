@@ -7,6 +7,7 @@ use ptroute_graph::{build_graph, layout_graph};
 use ptroute_model::{SceneFile, TraceFile, TraceRun};
 use ptroute_render::{render_scene, render_scene_progressive, write_png, RenderSettings};
 use ptroute_trace::{run_traces, TraceJobResult, TraceSettings};
+use ptroute_trace::{stream_for_target, TraceEvent};
 use serde::Serialize;
 use std::fs;
 use std::io::Write;
@@ -709,7 +710,24 @@ fn run_run(args: RunArgs) -> Result<()> {
 
 fn run_invade(args: InvadeArgs) -> Result<()> {
     let use_ansi = !args.no_ansi && io::stdout().is_terminal();
-    let interactive = use_ansi;
+    let interactive = use_ansi && !args.plain;
+
+    let mut targets: Vec<String> = Vec::new();
+    if let Some(path) = args.targets.clone() {
+        let contents = fs::read_to_string(&path)
+            .map_err(|err| anyhow!("failed to read targets file {:?}: {}", path, err))?;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            targets.push(trimmed.to_string());
+        }
+    }
+    targets.extend(args.target_list.clone());
+    if targets.is_empty() {
+        return Err(anyhow!("no targets provided (use --targets or --target)"));
+    }
 
     if !interactive {
         let output = render_invade_demo(80, true);
@@ -726,12 +744,94 @@ fn run_invade(args: InvadeArgs) -> Result<()> {
 
     let _guard = TermGuard::enter()?;
 
-    let (term_w, _) = terminal::size().unwrap_or((80, 24));
-    let demo = render_invade_demo(term_w, args.plain || args.ascii_only);
-    draw_frame(&demo)?;
+    let (term_w, term_h) = terminal::size().unwrap_or((80, 24));
+
+    // Start streaming for the first target only (M3 single-target streaming).
+    let settings = TraceSettings {
+        max_hops: args.max_hops,
+        probes: args.probes,
+        timeout_ms: args.timeout_ms,
+    };
+    let target = targets[0].clone();
+    let rx = stream_for_target(&target, &settings)?;
+
+    let mut state = invade::AppState {
+        wave: 1,
+        targets: vec![invade::TargetView {
+            name: target.clone(),
+            hops: Vec::new(),
+        }],
+        last_detail: None,
+    };
 
     while running.load(Ordering::SeqCst) {
-        if event::poll(std::time::Duration::from_millis(50))
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                TraceEvent::HopUpdate { ttl, ip, rtts } => {
+                    let loss = if rtts.is_empty() {
+                        1.0
+                    } else {
+                        let lost =
+                            rtts.iter().filter(|v: &&Option<f64>| v.is_none()).count() as f64;
+                        lost / rtts.len() as f64
+                    };
+                    let mut rtts_vals: Vec<f64> = rtts.iter().copied().flatten().collect();
+                    rtts_vals.sort_by(|a: &f64, b: &f64| {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let median_rtt = if rtts_vals.is_empty() {
+                        None
+                    } else {
+                        Some(rtts_vals[rtts_vals.len() / 2])
+                    };
+
+                    let hop = invade::HopView {
+                        ttl,
+                        ip: ip.clone(),
+                        loss,
+                        median_rtt,
+                    };
+                    let hops = &mut state.targets[0].hops;
+                    let idx = (ttl.saturating_sub(1)) as usize;
+                    if hops.len() <= idx {
+                        hops.resize_with(idx + 1, || invade::HopView {
+                            ttl: 0,
+                            ip: None,
+                            loss: 1.0,
+                            median_rtt: None,
+                        });
+                    }
+                    hops[idx] = hop;
+                    state.last_detail = Some(format!(
+                        "target={} ttl={} ip={} rtt={:.1?}ms loss={:.0}%",
+                        target,
+                        ttl,
+                        ip.unwrap_or_else(|| "*".to_string()),
+                        median_rtt,
+                        loss * 100.0
+                    ));
+                }
+                TraceEvent::Done { .. } => {
+                    running.store(false, Ordering::SeqCst);
+                }
+                TraceEvent::Error { message } => {
+                    state.last_detail = Some(message);
+                }
+            }
+        }
+
+        let buffer = invade::render_map(
+            &state,
+            &invade::UiOpts {
+                plain: args.plain,
+                ascii_only: args.ascii_only,
+            },
+            term_w,
+            term_h,
+        );
+        draw_frame(&buffer)?;
+
+        if event::poll(std::time::Duration::from_millis(args.refresh_ms))
             .map_err(|err| anyhow!("event poll failed: {err}"))?
         {
             if let event::Event::Key(key) =
