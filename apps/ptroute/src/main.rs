@@ -814,8 +814,10 @@ struct TermGuard;
 impl TermGuard {
     fn enter() -> Result<Self> {
         terminal::enable_raw_mode().map_err(|err| anyhow!("failed to enable raw mode: {err}"))?;
-        execute!(io::stdout(), terminal::EnterAlternateScreen, cursor::Hide)
-            .map_err(|err| anyhow!("failed to enter alt screen: {err}"))?;
+        if let Err(err) = execute!(io::stdout(), terminal::EnterAlternateScreen, cursor::Hide) {
+            let _ = terminal::disable_raw_mode();
+            return Err(anyhow!("failed to enter alt screen: {err}"));
+        }
         Ok(Self)
     }
 }
