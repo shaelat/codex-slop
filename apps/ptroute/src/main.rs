@@ -7,6 +7,7 @@ use ptroute_render::{render_scene, render_scene_progressive, write_png, RenderSe
 use ptroute_trace::{parse_traceroute_n_with_target, run_traceroute, TraceSettings};
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ enum Commands {
     Build(BuildArgs),
     Layout(LayoutArgs),
     Render(RenderArgs),
+    Run(RunArgs),
 }
 
 #[derive(Args)]
@@ -112,6 +114,72 @@ struct RenderArgs {
     progressive_every: u32,
 }
 
+#[derive(Args)]
+struct RunArgs {
+    #[arg(long)]
+    targets: Option<PathBuf>,
+
+    #[arg(long = "target")]
+    target_list: Vec<String>,
+
+    #[arg(long)]
+    out_dir: Option<PathBuf>,
+
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+
+    #[arg(long, default_value_t = 1600)]
+    width: u32,
+
+    #[arg(long, default_value_t = 900)]
+    height: u32,
+
+    #[arg(long, default_value_t = 64)]
+    spp: u32,
+
+    #[arg(long, default_value_t = 6)]
+    bounces: u32,
+
+    #[arg(long, default_value_t = 32)]
+    progress_every: u32,
+
+    #[arg(long, default_value_t = 0)]
+    threads: usize,
+
+    #[arg(long, default_value_t = 0)]
+    progressive_every: u32,
+
+    #[arg(long, default_value_t = 30)]
+    max_hops: u32,
+
+    #[arg(long, default_value_t = 3)]
+    probes: u32,
+
+    #[arg(long, default_value_t = 2000)]
+    timeout_ms: u64,
+
+    #[arg(long, default_value_t = 4)]
+    concurrency: usize,
+
+    #[arg(long, default_value_t = 1)]
+    repeat: u32,
+
+    #[arg(long, default_value_t = 0)]
+    interval_ms: u64,
+
+    #[arg(long)]
+    resume: bool,
+
+    #[arg(long)]
+    force: bool,
+
+    #[arg(long)]
+    plain: bool,
+
+    #[arg(long)]
+    open: bool,
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err}");
@@ -127,6 +195,7 @@ fn run() -> Result<()> {
         Commands::Build(args) => run_build(args),
         Commands::Layout(args) => run_layout(args),
         Commands::Render(args) => run_render(args),
+        Commands::Run(args) => run_run(args),
     }
 }
 
@@ -148,9 +217,7 @@ fn run_trace(args: TraceArgs) -> Result<()> {
     targets.extend(args.target_list);
 
     if targets.is_empty() {
-        return Err(anyhow!(
-            "no targets provided (use --targets or --target)"
-        ));
+        return Err(anyhow!("no targets provided (use --targets or --target)"));
     }
 
     if args.concurrency > 1 {
@@ -170,8 +237,7 @@ fn run_trace(args: TraceArgs) -> Result<()> {
             match run_traceroute(&target, &settings) {
                 Ok(raw) => match parse_traceroute_n_with_target(&raw, &target) {
                     Ok(parsed) => {
-                        let timestamp_utc =
-                            Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+                        let timestamp_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
                         runs.push(TraceRun {
                             target: parsed.target,
                             timestamp_utc,
@@ -232,8 +298,9 @@ fn run_render(args: RenderArgs) -> Result<()> {
 
     if let Some(parent) = args.out.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|err| anyhow!("failed to create output directory {:?}: {}", parent, err))?;
+            fs::create_dir_all(parent).map_err(|err| {
+                anyhow!("failed to create output directory {:?}: {}", parent, err)
+            })?;
         }
     }
 
@@ -263,11 +330,106 @@ fn run_render(args: RenderArgs) -> Result<()> {
     }
 }
 
+fn run_run(args: RunArgs) -> Result<()> {
+    if args.resume {
+        eprintln!("warning: --resume is not implemented yet; running full pipeline");
+    }
+    if args.force {
+        eprintln!("warning: --force is not implemented yet; running full pipeline");
+    }
+    if args.plain {
+        eprintln!("warning: --plain is not implemented yet; output will be standard text");
+    }
+
+    let out_dir = args.out_dir.unwrap_or_else(default_out_dir);
+
+    if !out_dir.exists() {
+        fs::create_dir_all(&out_dir)
+            .map_err(|err| anyhow!("failed to create output directory {:?}: {}", out_dir, err))?;
+    }
+
+    let traces_path = out_dir.join("traces.json");
+    let graph_path = out_dir.join("graph.json");
+    let scene_path = out_dir.join("scene.json");
+    let render_path = out_dir.join("render.png");
+
+    run_trace(TraceArgs {
+        targets: args.targets,
+        target_list: args.target_list,
+        out: traces_path.clone(),
+        max_hops: args.max_hops,
+        probes: args.probes,
+        timeout_ms: args.timeout_ms,
+        concurrency: args.concurrency,
+        repeat: args.repeat,
+        interval_ms: args.interval_ms,
+    })?;
+
+    run_build(BuildArgs {
+        in_path: traces_path.clone(),
+        out: graph_path.clone(),
+    })?;
+
+    run_layout(LayoutArgs {
+        in_path: graph_path.clone(),
+        out: scene_path.clone(),
+        seed: args.seed,
+    })?;
+
+    run_render(RenderArgs {
+        in_path: scene_path.clone(),
+        out: render_path.clone(),
+        width: args.width,
+        height: args.height,
+        spp: args.spp,
+        bounces: args.bounces,
+        seed: args.seed,
+        progress_every: args.progress_every,
+        threads: args.threads,
+        progressive_every: args.progressive_every,
+    })?;
+
+    if args.open {
+        open_file(&render_path)?;
+    }
+
+    Ok(())
+}
+
+fn default_out_dir() -> PathBuf {
+    let stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    PathBuf::from("output").join(stamp)
+}
+
+fn open_file(path: &PathBuf) -> Result<()> {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut cmd = Command::new("open");
+        cmd.arg(path);
+        cmd
+    } else if cfg!(target_os = "linux") {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(path);
+        cmd
+    } else {
+        return Err(anyhow!("--open is not supported on this OS"));
+    };
+
+    let status = cmd
+        .status()
+        .map_err(|err| anyhow!("failed to launch opener: {err}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("open command failed with status: {status}"))
+    }
+}
+
 fn write_json<T: serde::Serialize>(path: &PathBuf, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|err| anyhow!("failed to create output directory {:?}: {}", parent, err))?;
+            fs::create_dir_all(parent).map_err(|err| {
+                anyhow!("failed to create output directory {:?}: {}", parent, err)
+            })?;
         }
     }
 
