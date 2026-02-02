@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+mod invade;
 use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand};
 use crossterm::{cursor, event, execute, terminal};
@@ -750,46 +751,39 @@ fn run_invade(args: InvadeArgs) -> Result<()> {
 }
 
 fn render_invade_demo(term_w: u16, plain: bool) -> String {
-    let mut lines = Vec::new();
-    let title = "PATH TRACEROUTE INVADERS";
-    let wave = "WAVE 1";
-    lines.push(center_line(title, term_w));
-    lines.push(center_line(wave, term_w));
-    lines.push("".to_string());
-
-    let legend = "OK=green WARN=yellow BAD=red UNKNOWN=dim";
-    lines.push(center_line(legend, term_w));
-    lines.push("".to_string());
-
-    let max_hops = 12;
-    let ttl_header = (1..=max_hops)
-        .map(|n| (n % 10).to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
-    lines.push(format!("TTL: {ttl_header}"));
-
-    let ship = "<^>";
-    let inv = if plain { "W" } else { "W" };
-    let row = (0..max_hops).map(|_| inv).collect::<Vec<_>>().join("-");
-
-    lines.push(format!("{ship} {row}  1.1.1.1"));
-    lines.push(format!("{ship} {row}  8.8.8.8"));
-    lines.push("".to_string());
-    lines.push("Last hop: demo/ttl=4 ip=10.0.0.1 rtt=12.3ms loss=0%".to_string());
-
-    lines.join(
-        "
-",
-    )
-}
-
-fn center_line(text: &str, width: u16) -> String {
-    let width = width as usize;
-    if text.len() >= width {
-        return text.to_string();
-    }
-    let pad = (width - text.len()) / 2;
-    format!("{}{}", " ".repeat(pad), text)
+    let state = invade::AppState {
+        wave: 1,
+        targets: vec![
+            invade::TargetView {
+                name: "1.1.1.1".to_string(),
+                hops: (1..=6)
+                    .map(|ttl| invade::HopView {
+                        ttl,
+                        ip: Some("10.0.0.1".to_string()),
+                        loss: 0.0,
+                        median_rtt: Some(10.0 + ttl as f64),
+                    })
+                    .collect(),
+            },
+            invade::TargetView {
+                name: "8.8.8.8".to_string(),
+                hops: (1..=5)
+                    .map(|ttl| invade::HopView {
+                        ttl,
+                        ip: Some("192.168.0.1".to_string()),
+                        loss: 0.0,
+                        median_rtt: Some(12.0 + ttl as f64),
+                    })
+                    .collect(),
+            },
+        ],
+        last_detail: Some("Last hop: demo ttl=4 ip=10.0.0.1 rtt=12.3ms loss=0%".to_string()),
+    };
+    let opts = invade::UiOpts {
+        plain,
+        ascii_only: plain,
+    };
+    invade::render_map(&state, &opts, term_w, 24)
 }
 
 fn draw_frame(buffer: &str) -> Result<()> {
