@@ -5,11 +5,13 @@ use ptroute_graph::{build_graph, layout_graph};
 use ptroute_model::{SceneFile, TraceFile, TraceRun};
 use ptroute_render::{render_scene, render_scene_progressive, write_png, RenderSettings};
 use ptroute_trace::{parse_traceroute_n_with_target, run_traceroute, TraceSettings};
+use serde::Serialize;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(name = "ptroute", version, about = "PathTraceRoute CLI")]
@@ -180,6 +182,56 @@ struct RunArgs {
     open: bool,
 }
 
+#[derive(Serialize)]
+struct RunArgsSummary {
+    targets_file: Option<PathBuf>,
+    targets: Vec<String>,
+    out_dir: PathBuf,
+    seed: u64,
+    width: u32,
+    height: u32,
+    spp: u32,
+    bounces: u32,
+    progress_every: u32,
+    threads: usize,
+    progressive_every: u32,
+    max_hops: u32,
+    probes: u32,
+    timeout_ms: u64,
+    concurrency: usize,
+    repeat: u32,
+    interval_ms: u64,
+    resume: bool,
+    force: bool,
+    plain: bool,
+    open: bool,
+}
+
+#[derive(Serialize)]
+struct RunOutputs {
+    traces: PathBuf,
+    graph: PathBuf,
+    scene: PathBuf,
+    render: PathBuf,
+    run: PathBuf,
+}
+
+#[derive(Serialize)]
+struct HostInfo {
+    os: String,
+    arch: String,
+}
+
+#[derive(Serialize)]
+struct RunReceipt {
+    version: String,
+    started_at_utc: String,
+    finished_at_utc: String,
+    args: RunArgsSummary,
+    outputs: RunOutputs,
+    host: HostInfo,
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err}");
@@ -331,6 +383,8 @@ fn run_render(args: RenderArgs) -> Result<()> {
 }
 
 fn run_run(args: RunArgs) -> Result<()> {
+    let started_at_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+
     if args.resume {
         eprintln!("warning: --resume is not implemented yet; running full pipeline");
     }
@@ -341,7 +395,7 @@ fn run_run(args: RunArgs) -> Result<()> {
         eprintln!("warning: --plain is not implemented yet; output will be standard text");
     }
 
-    let out_dir = args.out_dir.unwrap_or_else(default_out_dir);
+    let out_dir = args.out_dir.clone().unwrap_or_else(default_out_dir);
 
     if !out_dir.exists() {
         fs::create_dir_all(&out_dir)
@@ -352,6 +406,31 @@ fn run_run(args: RunArgs) -> Result<()> {
     let graph_path = out_dir.join("graph.json");
     let scene_path = out_dir.join("scene.json");
     let render_path = out_dir.join("render.png");
+    let run_path = out_dir.join("run.json");
+
+    let args_summary = RunArgsSummary {
+        targets_file: args.targets.clone(),
+        targets: args.target_list.clone(),
+        out_dir: out_dir.clone(),
+        seed: args.seed,
+        width: args.width,
+        height: args.height,
+        spp: args.spp,
+        bounces: args.bounces,
+        progress_every: args.progress_every,
+        threads: args.threads,
+        progressive_every: args.progressive_every,
+        max_hops: args.max_hops,
+        probes: args.probes,
+        timeout_ms: args.timeout_ms,
+        concurrency: args.concurrency,
+        repeat: args.repeat,
+        interval_ms: args.interval_ms,
+        resume: args.resume,
+        force: args.force,
+        plain: args.plain,
+        open: args.open,
+    };
 
     run_trace(TraceArgs {
         targets: args.targets,
@@ -389,6 +468,27 @@ fn run_run(args: RunArgs) -> Result<()> {
         progressive_every: args.progressive_every,
     })?;
 
+    let finished_at_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let receipt = RunReceipt {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        started_at_utc,
+        finished_at_utc,
+        args: args_summary,
+        outputs: RunOutputs {
+            traces: traces_path.clone(),
+            graph: graph_path.clone(),
+            scene: scene_path.clone(),
+            render: render_path.clone(),
+            run: run_path.clone(),
+        },
+        host: HostInfo {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+        },
+    };
+
+    write_json(&run_path, &receipt)?;
+
     if args.open {
         open_file(&render_path)?;
     }
@@ -424,16 +524,49 @@ fn open_file(path: &PathBuf) -> Result<()> {
     }
 }
 
-fn write_json<T: serde::Serialize>(path: &PathBuf, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|err| {
-                anyhow!("failed to create output directory {:?}: {}", parent, err)
-            })?;
-        }
+fn write_json<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
+    let json = serde_json::to_vec_pretty(value)?;
+    atomic_write(path, &json)
+}
+
+fn atomic_write(path: &PathBuf, data: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    if !parent.as_os_str().is_empty() {
+        fs::create_dir_all(parent)
+            .map_err(|err| anyhow!("failed to create output directory {:?}: {}", parent, err))?;
     }
 
-    let json = serde_json::to_string_pretty(value)?;
-    fs::write(path, json).map_err(|err| anyhow!("failed to write output {:?}: {}", path, err))?;
+    let tmp_path = temp_path(path);
+    let mut file = fs::File::create(&tmp_path)
+        .map_err(|err| anyhow!("failed to create temp file {:?}: {}", tmp_path, err))?;
+    file.write_all(data)
+        .map_err(|err| anyhow!("failed to write temp file {:?}: {}", tmp_path, err))?;
+    file.sync_all()
+        .map_err(|err| anyhow!("failed to sync temp file {:?}: {}", tmp_path, err))?;
+
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(anyhow!("failed to replace output {:?}: {}", path, err));
+    }
+
+    if let Ok(dir) = fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+
     Ok(())
+}
+
+fn temp_path(path: &PathBuf) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("output");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+    let tmp_name = format!(".{}.part-{}-{}", file_name, pid, stamp);
+    parent.join(tmp_name)
 }
